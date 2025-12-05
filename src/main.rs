@@ -49,10 +49,16 @@ fn main() -> Result<()> {
     let mut request_count = 0u64;
     let mut spoofed_ip = generate_random_ip(&mut rng);
 
+    println!("Стартую с подставным IP {spoofed_ip}");
+
     loop {
         request_count += 1;
         if request_count > 1 && (request_count - 1) % 90 == 0 {
             spoofed_ip = generate_random_ip(&mut rng);
+            println!(
+                "Сменил подставной IP на {spoofed_ip} после {} запросов",
+                request_count - 1
+            );
             log_step(
                 trace_steps,
                 &format!(
@@ -181,9 +187,18 @@ fn fetch_contacts(
             return Ok(PageContacts::default());
         }
 
-        let page_source = fetch_with_browser(&url, user_agent, webdriver_url, trace_steps)?;
-        let page_document = Html::parse_document(&page_source);
-        return Ok(parse_contacts(&page_document));
+        match fetch_with_browser(&url, user_agent, webdriver_url, trace_steps) {
+            Ok(page_source) => {
+                let page_document = Html::parse_document(&page_source);
+                return Ok(parse_contacts(&page_document));
+            }
+            Err(err) => {
+                println!(
+                    "  Не удалось пройти проверку через WebDriver: {err}. Запустите сервер WebDriver или отключите браузер с помощью USE_BROWSER=0."
+                );
+                return Ok(PageContacts::default());
+            }
+        }
     }
 
     log_step(
