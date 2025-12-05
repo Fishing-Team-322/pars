@@ -1,6 +1,7 @@
 use std::{thread::sleep, time::Duration};
 
 use anyhow::{Context, Result};
+use fantoccini::{wd::Capabilities, ClientBuilder, Locator};
 use rand::{seq::SliceRandom, Rng};
 use regex::Regex;
 use reqwest::{
@@ -8,6 +9,7 @@ use reqwest::{
     header::{REFERER, USER_AGENT},
 };
 use scraper::{Html, Selector};
+use serde_json::json;
 
 #[derive(Default, Debug)]
 struct PageContacts {
@@ -19,6 +21,12 @@ fn main() -> Result<()> {
     let client = Client::builder()
         .build()
         .context("Не удалось создать HTTP клиент")?;
+
+    let use_browser = std::env::var("USE_BROWSER")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+    let webdriver_url =
+        std::env::var("WEBDRIVER_URL").unwrap_or_else(|_| "http://localhost:4444".to_string());
 
     let user_agents = vec![
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -42,8 +50,15 @@ fn main() -> Result<()> {
             .to_string();
         let referer = referers.choose(&mut rng).map(|s| *s);
 
-        let contacts = fetch_contacts(&client, id, &user_agent, referer)
-            .with_context(|| format!("Ошибка при запросе страницы с id {id}"))?;
+        let contacts = fetch_contacts(
+            &client,
+            id,
+            &user_agent,
+            referer,
+            use_browser,
+            &webdriver_url,
+        )
+        .with_context(|| format!("Ошибка при запросе страницы с id {id}"))?;
 
         if contacts.phones.is_empty() && contacts.names.is_empty() {
             println!(
@@ -78,8 +93,6 @@ fn main() -> Result<()> {
         let delay_ms = rng.gen_range(750..=2000);
         sleep(Duration::from_millis(delay_ms));
     }
-
-    Ok(())
 }
 
 fn fetch_contacts(
@@ -87,9 +100,11 @@ fn fetch_contacts(
     id: u64,
     user_agent: &str,
     referer: Option<&str>,
+    use_browser: bool,
+    webdriver_url: &str,
 ) -> Result<PageContacts> {
     let url = format!("https://www.list-org.com/company/{id}");
-    let mut request = client.get(url).header(USER_AGENT, user_agent);
+    let mut request = client.get(url.clone()).header(USER_AGENT, user_agent);
 
     if let Some(referer) = referer {
         request = request.header(REFERER, referer);
@@ -106,6 +121,21 @@ fn fetch_contacts(
         .context("Не удалось прочитать тело ответа")?;
     let document = Html::parse_document(&body);
 
+    if is_turnstile_challenge(&document) {
+        if !use_browser {
+            println!("  Страница защищена Cloudflare Turnstile, включите USE_BROWSER=1 для автоматического клика по проверке");
+            return Ok(PageContacts::default());
+        }
+
+        let page_source = fetch_with_browser(&url, user_agent, webdriver_url)?;
+        let page_document = Html::parse_document(&page_source);
+        return Ok(parse_contacts(&page_document));
+    }
+
+    Ok(parse_contacts(&document))
+}
+
+fn parse_contacts(document: &Html) -> PageContacts {
     let row_selector = Selector::parse("tr").expect("валидный селектор tr");
     let cell_selector = Selector::parse("td").expect("валидный селектор td");
     let anchor_selector = Selector::parse("a").expect("валидный селектор a");
@@ -175,7 +205,7 @@ fn fetch_contacts(
         }
     }
 
-    Ok(result)
+    result
 }
 
 fn normalize_text(text: &str) -> String {
@@ -246,4 +276,62 @@ fn push_unique(list: &mut Vec<String>, value: String) {
     if !list.iter().any(|v| v == &value) {
         list.push(value);
     }
+}
+
+fn is_turnstile_challenge(document: &Html) -> bool {
+    let challenge_header = Selector::parse("span.h1").expect("валидный селектор span.h1");
+    let turnstile = Selector::parse(".cf-turnstile").expect("валидный селектор .cf-turnstile");
+
+    document
+        .select(&challenge_header)
+        .any(|el| normalize_text(&el.text().collect::<Vec<_>>().join(" ")).contains("Проверка"))
+        || document.select(&turnstile).next().is_some()
+}
+
+fn fetch_with_browser(url: &str, user_agent: &str, webdriver_url: &str) -> Result<String> {
+    let runtime =
+        tokio::runtime::Runtime::new().context("Не удалось создать runtime для WebDriver")?;
+
+    runtime.block_on(async move {
+        let caps = json!({
+            "moz:firefoxOptions": {
+                "args": ["-headless"],
+                "prefs": {"general.useragent.override": user_agent},
+            }
+        });
+        let caps: Capabilities =
+            serde_json::from_value(caps).context("Не удалось подготовить capabilities")?;
+
+        let client = ClientBuilder::native()
+            .capabilities(caps)
+            .connect(webdriver_url)
+            .await
+            .context("Не удалось подключиться к WebDriver")?;
+
+        client
+            .goto(url)
+            .await
+            .context("Не удалось открыть страницу в браузере")?;
+        client
+            .wait()
+            .at_most(std::time::Duration::from_secs(25))
+            .for_element(Locator::Css("form[name='frm']"))
+            .await
+            .context("Не удалось дождаться формы проверки")?;
+
+        if let Ok(button) = client.find(Locator::Css("input[name='submit']")).await {
+            let _ = button.click().await;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let source = client
+            .source()
+            .await
+            .context("Не удалось получить исходный код страницы")?;
+
+        let _ = client.close().await;
+
+        Ok(source)
+    })
 }
