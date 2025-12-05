@@ -47,10 +47,12 @@ fn main() -> Result<()> {
 
         if contacts.phones.is_empty() && contacts.names.is_empty() {
             println!(
-                "[{}] На странице нет телефона и ФИО, парсинг остановлен.",
+                "[{}] На странице нет телефона и ФИО, жду 2 секунды перед повторной проверкой",
                 id
             );
-            break;
+            sleep(Duration::from_secs(2));
+            id += 1;
+            continue;
         }
 
         println!("ID: {}", id);
