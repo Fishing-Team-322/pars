@@ -319,11 +319,13 @@ fn fetch_with_browser(url: &str, user_agent: &str, webdriver_url: &str) -> Resul
             .await
             .context("Не удалось дождаться формы проверки")?;
 
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
         if let Ok(button) = client.find(Locator::Css("input[name='submit']")).await {
             let _ = button.click().await;
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         let source = client
             .source()
