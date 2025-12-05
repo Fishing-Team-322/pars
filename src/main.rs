@@ -46,8 +46,22 @@ fn main() -> Result<()> {
 
     let mut id = 1u64;
     let mut rng = rand::thread_rng();
+    let mut request_count = 0u64;
+    let mut spoofed_ip = generate_random_ip(&mut rng);
 
     loop {
+        request_count += 1;
+        if request_count > 1 && (request_count - 1) % 90 == 0 {
+            spoofed_ip = generate_random_ip(&mut rng);
+            log_step(
+                trace_steps,
+                &format!(
+                    "Сменил подставной IP на {spoofed_ip} после {} запросов",
+                    request_count - 1
+                ),
+            );
+        }
+
         let user_agent = user_agents
             .choose(&mut rng)
             .expect("список user-agent не пуст")
@@ -64,6 +78,7 @@ fn main() -> Result<()> {
             id,
             &user_agent,
             referer,
+            &spoofed_ip,
             use_browser,
             &webdriver_url,
             trace_steps,
@@ -110,12 +125,17 @@ fn fetch_contacts(
     id: u64,
     user_agent: &str,
     referer: Option<&str>,
+    spoofed_ip: &str,
     use_browser: bool,
     webdriver_url: &str,
     trace_steps: bool,
 ) -> Result<PageContacts> {
     let url = format!("https://www.list-org.com/company/{id}");
-    let mut request = client.get(url.clone()).header(USER_AGENT, user_agent);
+    let mut request = client
+        .get(url.clone())
+        .header(USER_AGENT, user_agent)
+        .header("X-Forwarded-For", spoofed_ip)
+        .header("X-Real-IP", spoofed_ip);
 
     if let Some(referer) = referer {
         request = request.header(REFERER, referer);
@@ -128,6 +148,11 @@ fn fetch_contacts(
     log_step(
         trace_steps,
         &format!("ID {id}: использую User-Agent {user_agent}"),
+    );
+
+    log_step(
+        trace_steps,
+        &format!("ID {id}: отправляю запрос с подставным IP {spoofed_ip}"),
     );
 
     let response = request
@@ -392,4 +417,14 @@ fn log_step(enabled: bool, message: &str) {
     if enabled {
         println!("[TRACE] {message}");
     }
+}
+
+fn generate_random_ip(rng: &mut impl Rng) -> String {
+    format!(
+        "{}.{}.{}.{}",
+        rng.gen_range(1..=254),
+        rng.gen_range(0..=255),
+        rng.gen_range(0..=255),
+        rng.gen_range(1..=254)
+    )
 }
