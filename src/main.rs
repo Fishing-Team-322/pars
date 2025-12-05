@@ -73,6 +73,9 @@ fn fetch_contacts(client: &Client, id: u64) -> Result<PageContacts> {
 
     let row_selector = Selector::parse("tr").expect("валидный селектор tr");
     let cell_selector = Selector::parse("td").expect("валидный селектор td");
+    let anchor_selector = Selector::parse("a").expect("валидный селектор a");
+    let span_selector = Selector::parse("span").expect("валидный селектор span");
+    let italic_selector = Selector::parse("p > i").expect("валидный селектор p > i");
 
     let mut result = PageContacts::default();
 
@@ -90,11 +93,40 @@ fn fetch_contacts(client: &Client, id: u64) -> Result<PageContacts> {
 
         let label_lower = label.to_lowercase();
         if label_lower.contains("телефон") {
-            result.phones.extend(extract_phones(&value));
+            for phone in extract_phones(&value) {
+                push_unique(&mut result.phones, phone);
+            }
         } else if label_lower.contains("руководитель") || label_lower.contains("фио")
         {
-            if !value.is_empty() {
-                result.names.push(value);
+            let mut names: Vec<String> = value_cell
+                .select(&anchor_selector)
+                .map(|a| normalize_text(&a.text().collect::<Vec<_>>().join(" ")))
+                .filter(|text| !text.is_empty())
+                .collect();
+
+            if names.is_empty() && !value.is_empty() {
+                names.push(value);
+            }
+
+            for name in names {
+                push_unique(&mut result.names, name);
+            }
+        }
+    }
+
+    for phone_label in document.select(&italic_selector) {
+        let label_text = normalize_text(&phone_label.text().collect::<Vec<_>>().join(" "));
+        if !label_text.to_lowercase().contains("телефон") {
+            continue;
+        }
+
+        if let Some(parent) = phone_label.parent().and_then(scraper::ElementRef::wrap) {
+            for span in parent.select(&span_selector) {
+                let phone = normalize_text(&span.text().collect::<Vec<_>>().join(" "));
+                if phone.is_empty() || !phone.chars().any(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                push_unique(&mut result.phones, phone);
             }
         }
     }
@@ -113,4 +145,10 @@ fn extract_phones(text: &str) -> Vec<String> {
         .find_iter(text)
         .map(|m| normalize_text(m.as_str()))
         .collect()
+}
+
+fn push_unique(list: &mut Vec<String>, value: String) {
+    if !list.iter().any(|v| v == &value) {
+        list.push(value);
+    }
 }
