@@ -98,14 +98,22 @@ fn fetch_contacts(client: &Client, id: u64) -> Result<PageContacts> {
             }
         } else if label_lower.contains("руководитель") || label_lower.contains("фио")
         {
-            let mut names: Vec<String> = value_cell
+            let mut names: Vec<String> = Vec::new();
+
+            for anchor_name in value_cell
                 .select(&anchor_selector)
                 .map(|a| normalize_text(&a.text().collect::<Vec<_>>().join(" ")))
                 .filter(|text| !text.is_empty())
-                .collect();
+            {
+                for name in extract_person_names(&anchor_name) {
+                    push_unique(&mut names, name);
+                }
+            }
 
             if names.is_empty() && !value.is_empty() {
-                names.push(value);
+                for name in extract_person_names(&value) {
+                    push_unique(&mut names, name);
+                }
             }
 
             for name in names {
@@ -145,6 +153,30 @@ fn extract_phones(text: &str) -> Vec<String> {
         .find_iter(text)
         .map(|m| normalize_text(m.as_str()))
         .collect()
+}
+
+fn extract_person_names(text: &str) -> Vec<String> {
+    let fio_re =
+        Regex::new(r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?(?:\s+[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?){1,2}")
+            .expect("валидное регулярное выражение ФИО");
+
+    let mut names = Vec::new();
+
+    for capture in fio_re.find_iter(text) {
+        let name = normalize_text(capture.as_str());
+        if !names.iter().any(|n| n == &name) {
+            names.push(name);
+        }
+    }
+
+    if names.is_empty() {
+        let normalized = normalize_text(text);
+        if !normalized.is_empty() {
+            names.push(normalized);
+        }
+    }
+
+    names
 }
 
 fn push_unique(list: &mut Vec<String>, value: String) {
