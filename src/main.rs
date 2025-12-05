@@ -1,0 +1,116 @@
+use std::{thread::sleep, time::Duration};
+
+use anyhow::{Context, Result};
+use regex::Regex;
+use reqwest::blocking::Client;
+use scraper::{Html, Selector};
+
+#[derive(Default, Debug)]
+struct PageContacts {
+    phones: Vec<String>,
+    names: Vec<String>,
+}
+
+fn main() -> Result<()> {
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; list-org-parser/0.1; +https://example.com)")
+        .build()
+        .context("Не удалось создать HTTP клиент")?;
+
+    let mut id = 1u64;
+
+    loop {
+        let contacts = fetch_contacts(&client, id)
+            .with_context(|| format!("Ошибка при запросе страницы с id {id}"))?;
+
+        if contacts.phones.is_empty() && contacts.names.is_empty() {
+            println!(
+                "[{}] На странице нет телефона и ФИО, парсинг остановлен.",
+                id
+            );
+            break;
+        }
+
+        println!("ID: {}", id);
+        if contacts.phones.is_empty() {
+            println!("  Телефоны: нет данных");
+        } else {
+            for phone in contacts.phones {
+                println!("  Телефон: {}", phone);
+            }
+        }
+
+        if contacts.names.is_empty() {
+            println!("  ФИО: нет данных");
+        } else {
+            for name in contacts.names {
+                println!("  ФИО: {}", name);
+            }
+        }
+
+        println!("----------------------------------------");
+
+        id += 1;
+        sleep(Duration::from_millis(300));
+    }
+
+    Ok(())
+}
+
+fn fetch_contacts(client: &Client, id: u64) -> Result<PageContacts> {
+    let url = format!("https://www.list-org.com/company/{id}");
+    let response = client
+        .get(url)
+        .send()
+        .context("HTTP запрос завершился неудачно")?
+        .error_for_status()
+        .context("Сервер вернул ошибочный статус")?;
+
+    let body = response
+        .text()
+        .context("Не удалось прочитать тело ответа")?;
+    let document = Html::parse_document(&body);
+
+    let row_selector = Selector::parse("tr").expect("валидный селектор tr");
+    let cell_selector = Selector::parse("td").expect("валидный селектор td");
+
+    let mut result = PageContacts::default();
+
+    for row in document.select(&row_selector) {
+        let mut cells = row.select(&cell_selector);
+        let Some(label_cell) = cells.next() else {
+            continue;
+        };
+        let Some(value_cell) = cells.next() else {
+            continue;
+        };
+
+        let label = normalize_text(&label_cell.text().collect::<Vec<_>>().join(" "));
+        let value = normalize_text(&value_cell.text().collect::<Vec<_>>().join(" "));
+
+        let label_lower = label.to_lowercase();
+        if label_lower.contains("телефон") {
+            result.phones.extend(extract_phones(&value));
+        } else if label_lower.contains("руководитель") || label_lower.contains("фио")
+        {
+            if !value.is_empty() {
+                result.names.push(value);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn normalize_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_phones(text: &str) -> Vec<String> {
+    let phone_re =
+        Regex::new(r"[+]?([\d][\d()\-\s]{4,}\d)").expect("валидное регулярное выражение");
+    phone_re
+        .find_iter(text)
+        .map(|m| normalize_text(m.as_str()))
+        .collect()
+}
