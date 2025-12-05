@@ -1,8 +1,12 @@
 use std::{thread::sleep, time::Duration};
 
 use anyhow::{Context, Result};
+use rand::{seq::SliceRandom, Rng};
 use regex::Regex;
-use reqwest::blocking::Client;
+use reqwest::{
+    blocking::Client,
+    header::{REFERER, USER_AGENT},
+};
 use scraper::{Html, Selector};
 
 #[derive(Default, Debug)]
@@ -13,14 +17,32 @@ struct PageContacts {
 
 fn main() -> Result<()> {
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 (compatible; list-org-parser/0.1; +https://example.com)")
         .build()
         .context("Не удалось создать HTTP клиент")?;
 
+    let user_agents = vec![
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    ];
+
+    let referers = vec![
+        "https://www.google.com/",
+        "https://yandex.ru/",
+        "https://www.bing.com/",
+    ];
+
     let mut id = 1u64;
+    let mut rng = rand::thread_rng();
 
     loop {
-        let contacts = fetch_contacts(&client, id)
+        let user_agent = user_agents
+            .choose(&mut rng)
+            .expect("список user-agent не пуст")
+            .to_string();
+        let referer = referers.choose(&mut rng).map(|s| *s);
+
+        let contacts = fetch_contacts(&client, id, &user_agent, referer)
             .with_context(|| format!("Ошибка при запросе страницы с id {id}"))?;
 
         if contacts.phones.is_empty() && contacts.names.is_empty() {
@@ -51,16 +73,27 @@ fn main() -> Result<()> {
         println!("----------------------------------------");
 
         id += 1;
-        sleep(Duration::from_millis(300));
+        let delay_ms = rng.gen_range(750..=2000);
+        sleep(Duration::from_millis(delay_ms));
     }
 
     Ok(())
 }
 
-fn fetch_contacts(client: &Client, id: u64) -> Result<PageContacts> {
+fn fetch_contacts(
+    client: &Client,
+    id: u64,
+    user_agent: &str,
+    referer: Option<&str>,
+) -> Result<PageContacts> {
     let url = format!("https://www.list-org.com/company/{id}");
-    let response = client
-        .get(url)
+    let mut request = client.get(url).header(USER_AGENT, user_agent);
+
+    if let Some(referer) = referer {
+        request = request.header(REFERER, referer);
+    }
+
+    let response = request
         .send()
         .context("HTTP запрос завершился неудачно")?
         .error_for_status()
@@ -102,6 +135,7 @@ fn fetch_contacts(client: &Client, id: u64) -> Result<PageContacts> {
 
             for anchor_name in value_cell
                 .select(&anchor_selector)
+                .filter(|anchor| !is_element_hidden(anchor))
                 .map(|a| normalize_text(&a.text().collect::<Vec<_>>().join(" ")))
                 .filter(|text| !text.is_empty())
             {
@@ -177,6 +211,33 @@ fn extract_person_names(text: &str) -> Vec<String> {
     }
 
     names
+}
+
+fn is_element_hidden(element: &scraper::ElementRef) -> bool {
+    let value = element.value();
+
+    if value.attr("hidden").is_some() {
+        return true;
+    }
+
+    if let Some(style) = value.attr("style") {
+        let style_lower = style.to_ascii_lowercase();
+        if style_lower.contains("display:none")
+            || style_lower.contains("visibility:hidden")
+            || style_lower.contains("opacity:0")
+            || style_lower.contains("opacity: 0")
+        {
+            return true;
+        }
+    }
+
+    if let Some(aria_hidden) = value.attr("aria-hidden") {
+        if aria_hidden.eq_ignore_ascii_case("true") {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn push_unique(list: &mut Vec<String>, value: String) {

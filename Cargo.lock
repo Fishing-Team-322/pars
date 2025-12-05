@@ -828,6 +828,7 @@ name = "pars"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rand 0.8.5",
  "regex",
  "reqwest",
  "scraper",
