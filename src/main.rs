@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     let use_browser = std::env::var("USE_BROWSER")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
+        .unwrap_or(true);
     let webdriver_url =
         std::env::var("WEBDRIVER_URL").unwrap_or_else(|_| "http://localhost:4444".to_string());
 
