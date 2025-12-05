@@ -22,6 +22,10 @@ fn main() -> Result<()> {
         .build()
         .context("Не удалось создать HTTP клиент")?;
 
+    let trace_steps = std::env::var("TRACE_STEPS")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
     let use_browser = std::env::var("USE_BROWSER")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(true);
@@ -50,6 +54,11 @@ fn main() -> Result<()> {
             .to_string();
         let referer = referers.choose(&mut rng).map(|s| *s);
 
+        log_step(
+            trace_steps,
+            &format!("ID {id}: запрашиваю https://www.list-org.com/company/{id}"),
+        );
+
         let contacts = fetch_contacts(
             &client,
             id,
@@ -57,6 +66,7 @@ fn main() -> Result<()> {
             referer,
             use_browser,
             &webdriver_url,
+            trace_steps,
         )
         .with_context(|| format!("Ошибка при запросе страницы с id {id}"))?;
 
@@ -102,13 +112,23 @@ fn fetch_contacts(
     referer: Option<&str>,
     use_browser: bool,
     webdriver_url: &str,
+    trace_steps: bool,
 ) -> Result<PageContacts> {
     let url = format!("https://www.list-org.com/company/{id}");
     let mut request = client.get(url.clone()).header(USER_AGENT, user_agent);
 
     if let Some(referer) = referer {
         request = request.header(REFERER, referer);
+        log_step(
+            trace_steps,
+            &format!("ID {id}: отправляю запрос с Referer {referer}"),
+        );
     }
+
+    log_step(
+        trace_steps,
+        &format!("ID {id}: использую User-Agent {user_agent}"),
+    );
 
     let response = request
         .send()
@@ -116,21 +136,35 @@ fn fetch_contacts(
         .error_for_status()
         .context("Сервер вернул ошибочный статус")?;
 
+    log_step(
+        trace_steps,
+        &format!("ID {id}: получен ответ со статусом {}", response.status()),
+    );
+
     let body = response
         .text()
         .context("Не удалось прочитать тело ответа")?;
     let document = Html::parse_document(&body);
 
     if is_turnstile_challenge(&document) {
+        log_step(
+            trace_steps,
+            &format!("ID {id}: обнаружена проверка Cloudflare, переключаюсь на WebDriver"),
+        );
         if !use_browser {
             println!("  Страница защищена Cloudflare Turnstile, включите USE_BROWSER=1 для автоматического клика по проверке");
             return Ok(PageContacts::default());
         }
 
-        let page_source = fetch_with_browser(&url, user_agent, webdriver_url)?;
+        let page_source = fetch_with_browser(&url, user_agent, webdriver_url, trace_steps)?;
         let page_document = Html::parse_document(&page_source);
         return Ok(parse_contacts(&page_document));
     }
+
+    log_step(
+        trace_steps,
+        &format!("ID {id}: страница получена без проверки"),
+    );
 
     Ok(parse_contacts(&document))
 }
@@ -288,7 +322,12 @@ fn is_turnstile_challenge(document: &Html) -> bool {
         || document.select(&turnstile).next().is_some()
 }
 
-fn fetch_with_browser(url: &str, user_agent: &str, webdriver_url: &str) -> Result<String> {
+fn fetch_with_browser(
+    url: &str,
+    user_agent: &str,
+    webdriver_url: &str,
+    trace_steps: bool,
+) -> Result<String> {
     let runtime =
         tokio::runtime::Runtime::new().context("Не удалось создать runtime для WebDriver")?;
 
@@ -308,10 +347,17 @@ fn fetch_with_browser(url: &str, user_agent: &str, webdriver_url: &str) -> Resul
             .await
             .context("Не удалось подключиться к WebDriver")?;
 
+        log_step(trace_steps, "Открыл браузер через WebDriver");
+
         client
             .goto(url)
             .await
             .context("Не удалось открыть страницу в браузере")?;
+
+        log_step(
+            trace_steps,
+            "Страница открыта в браузере, жду форму проверки",
+        );
         client
             .wait()
             .at_most(std::time::Duration::from_secs(25))
@@ -321,11 +367,15 @@ fn fetch_with_browser(url: &str, user_agent: &str, webdriver_url: &str) -> Resul
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
+        log_step(trace_steps, "Пробую нажать на кнопку проверки");
+
         if let Ok(button) = client.find(Locator::Css("input[name='submit']")).await {
             let _ = button.click().await;
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        log_step(trace_steps, "Получаю исходный код страницы из браузера");
 
         let source = client
             .source()
@@ -336,4 +386,10 @@ fn fetch_with_browser(url: &str, user_agent: &str, webdriver_url: &str) -> Resul
 
         Ok(source)
     })
+}
+
+fn log_step(enabled: bool, message: &str) {
+    if enabled {
+        println!("[TRACE] {message}");
+    }
 }
